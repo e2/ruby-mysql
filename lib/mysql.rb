@@ -71,7 +71,7 @@ class Mysql
     # Return client version as Integer.
     # This value is dummy. If you want to get version of this library, use Mysql::VERSION.
     def client_version
-      50000
+      50123  # to avoid Rails workarounds for old mysql clients
     end
     alias get_client_version client_version
   end
@@ -107,14 +107,29 @@ class Mysql
   # === Return
   # self
   def connect(host=nil, user=nil, passwd=nil, db=nil, port=nil, socket=nil, flag=nil)
+    @prev_args = [host, user, passwd, db, port, socket, flag]
     @protocol = Protocol.new host, port, socket, @connect_timeout, @read_timeout, @write_timeout
-    @protocol.authenticate user, passwd, db, (@local_infile ? CLIENT_LOCAL_FILES : 0), @charset
+    @protocol.authenticate user, passwd, db, (@local_infile ? CLIENT_LOCAL_FILES : 0) | (flag || 0) , @charset
     @charset ||= @protocol.charset
     @host_info = (host.nil? || host == "localhost") ? 'Localhost via UNIX socket' : "#{host} via TCP/IP"
     query @init_command if @init_command
     return self
   end
+
   alias real_connect connect
+
+  attr_writer :reconnect
+
+  # Reconnect for Rails
+  def reconnect
+    if @protocol
+      return false unless @reconnect
+      close
+    end
+
+    connect(*@prev_args)
+    return true
+  end
 
   # Disconnect from mysql.
   def close
@@ -499,7 +514,12 @@ class Mysql
   # === Return
   # [String] statistics message
   def stat
-    @protocol.statistics_command
+    raise ClientError, "Not connected" unless @protocol
+    begin
+      @protocol.statistics_command
+    rescue Errno::EPIPE
+      raise ClientError, "MySQL server has gone away"
+    end
   end
 
   # Commit transaction

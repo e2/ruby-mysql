@@ -7,9 +7,9 @@ require "#{File.dirname __FILE__}/../lib/mysql"
 
 # MYSQL_USER must have ALL privilege for MYSQL_DATABASE.* and RELOAD privilege for *.*
 MYSQL_SERVER   = "localhost"
-MYSQL_USER     = "test"
-MYSQL_PASSWORD = "hogehoge"
-MYSQL_DATABASE = "test_for_mysql_ruby"
+MYSQL_USER     = ENV['MYSQL_USER'] || "test"
+MYSQL_PASSWORD = ENV['MYSQL_PASSWORD'] || "hogehoge"
+MYSQL_DATABASE = ENV['MYSQL_DB'] || "test_for_mysql_ruby"
 MYSQL_PORT     = 3306
 MYSQL_SOCKET   = "/var/run/mysqld/mysqld.sock"
 
@@ -81,13 +81,19 @@ end
 
 describe 'Mysql.client_version' do
   it 'returns client version as Integer' do
-    Mysql.client_version.should == 50000
+    Mysql.client_version.should == 50123
+  end
+end
+
+describe 'Mysql.client_version' do
+  it 'returns client version compatible with Rails' do
+    Mysql.client_version.should == 50123
   end
 end
 
 describe 'Mysql.get_client_version' do
   it 'returns client version as Integer' do
-    Mysql.client_version.should == 50000
+    Mysql.client_version.should == 50123
   end
 end
 
@@ -151,7 +157,84 @@ describe 'Mysql#options' do
     @m.connect(MYSQL_SERVER, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT, MYSQL_SOCKET)
     @m.query('select @@character_set_connection').fetch_row.should == ['utf8']
   end
+  it 'uses the provided flags' do
+    @m.stub(:query)
+    protocol = mock(:charset => 'abc', :quit_command => nil)
+    Mysql::Protocol.stub!(:new => protocol)
+    protocol.should_receive(:authenticate).with(:user1, :passwd, :db, Mysql::CLIENT_MULTI_RESULTS, nil)
+    @m.connect(:host, :user1, :passwd, :db, :port, :socket, Mysql::CLIENT_MULTI_RESULTS)
+  end
 end
+
+describe 'Mysql' do
+  before do
+    @m = Mysql.init
+    @args = [MYSQL_SERVER, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT, MYSQL_SOCKET, Mysql::CLIENT_MULTI_RESULTS]
+    @m.connect(*@args)
+  end
+  after do
+    @m.close
+  end
+  describe 'reconnect' do
+    describe 'without reconnect set' do
+      it "should return false if connected" do
+        @m.should_receive(:connect).never
+        @m.reconnect.should == false
+      end
+      it "should connect and return true if not connected" do
+        @m.close
+        @m.should_receive(:connect).with(*@args).once
+        @m.reconnect.should == true
+      end
+    end
+    describe 'with reconnect set' do
+      it "should connect if not connected and return true" do
+        @m.close
+        @m.reconnect = true
+        @m.should_receive(:connect).with(*@args).once
+        @m.reconnect.should == true
+      end
+      it "should close and reconnect if connected and return true" do
+        @m.reconnect = true
+        @m.should_receive(:close).twice
+        @m.should_receive(:connect).with(*@args).once
+        @m.reconnect.should == true
+      end
+    end
+  end
+end
+
+describe 'Mysql' do
+  describe 'stat for Rails' do
+    it 'should raise a client error if no connection' do
+      lambda { Mysql.init.stat }.should raise_error(Mysql::ClientError)
+    end
+    it 'should raise a client error on broken pipe' do
+      socket = nil
+
+      # get a copy of the socket for stubbing
+      UNIXSocket.stub!(:new) do |path|
+        UNIXSocket.unstub!(:new)
+        socket = UNIXSocket.new(path)
+      end
+
+      #TODO: not tested!
+      TCPSocket.stub!(:new => socket) do |host, port|
+        TCPSocket.unstub!(:new)
+        socket = TCPSocket.new(host,port)
+      end
+
+      @m = Mysql.new(MYSQL_SERVER, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, MYSQL_PORT, MYSQL_SOCKET)
+
+      # Rails calls stat to test if active
+      socket.should_receive(:flush).and_raise(Errno::EPIPE.new("Broken pipe"))
+
+      # Rails expects Mysql::Error to be thrown
+      lambda { @m.stat }.should raise_error(Mysql::ClientError, "MySQL server has gone away")
+    end
+  end
+end
+
 
 describe 'Mysql' do
   before do
